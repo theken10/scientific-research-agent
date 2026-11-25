@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+data/pdfs/*.pdf
+eval_results/*.json
+.pytest_cache/
