@@ -1,0 +1,9 @@
+# One JSON object per line. Lines starting with # are ignored.
+# IMPORTANT: these are STARTER entries. Open each pdf, find the pages that really answer the
+# question, and fill in "pages". Delete anything you can't verify. A dataset you checked by
+# hand is the whole point of the evaluation, so aim for 30+ questions.
+{"id": "q1", "question": "How are graph neural networks used for particle reconstruction in high energy physics detectors?", "gold": [{"doc": "2003.11603.pdf", "pages": []}]}
+{"id": "q2", "question": "What is distance-weighted graph network and how does it handle irregular detector geometry?", "gold": [{"doc": "1902.07987.pdf", "pages": []}]}
+{"id": "q3", "question": "How does MLPF perform machine-learned particle-flow reconstruction?", "gold": [{"doc": "2101.08578.pdf", "pages": []}]}
+{"id": "q4", "question": "How does ParticleNet represent jets for tagging?", "gold": [{"doc": "1902.08570.pdf", "pages": []}]}
+{"id": "q5", "question": "What machine learning applications are discussed for event reconstruction in the HEP community white paper?", "gold": [{"doc": "1807.02876.pdf", "pages": []}]}
