@@ -1,58 +1,121 @@
 # Scientific Research Agent
 
-An agentic retrieval-augmented generation (RAG) prototype for exploring scientific papers with source-grounded answers and page-level citations.
+RAG + agent system for searching scientific papers, comparing sources, and answering with
+page-level citations. Every answer is fact-checked sentence by sentence against the passage
+it cites, and unsupported claims get flagged.
 
-## Overview
+Example question: *"Explain the machine learning methods used in particle event reconstruction."*
 
-This project combines dense vector retrieval and PostgreSQL full-text search, Reciprocal Rank Fusion (RRF), cross-encoder reranking, answer generation, and citation/claim verification. A LangGraph workflow coordinates planning, retrieval, synthesis, and verification.
+## How it works
 
-## Architecture
+```
+question
+  -> plan        (original question, optionally LLM-written sub-queries)
+  -> retrieve    (Qdrant dense + Postgres full-text, fused with RRF, cross-encoder rerank)
+  -> organise    (group passages by paper so the model can compare them)
+  -> generate    (LLM, must cite [S1], [S2]... after each claim)
+  -> verify      (NLI check per sentence: supported / unsupported / uncited / bad_citation)
+        |-- too many unsupported claims? -> regenerate once with a stricter prompt
+  -> answer + sources (title, file, page) + flagged claims
+```
 
-1. Ingest scientific PDFs and split their text into chunks with page metadata.
-2. Index chunks in Qdrant for dense retrieval and PostgreSQL for keyword search.
-3. Fuse retrieval results with RRF and rerank candidate passages.
-4. Generate an answer with citations to retrieved sources.
-5. Check answer claims against cited passages and retry once when unsupported claims are detected.
+| Part | Tech |
+|---|---|
+| API | FastAPI |
+| Agent workflow | LangGraph |
+| Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
+| Vector DB | Qdrant |
+| Keyword search + metadata | PostgreSQL (GIN full-text index) |
+| Reranker | cross-encoder ms-marco-MiniLM |
+| LLM | Hugging Face Transformers (Qwen2.5-1.5B-Instruct default) or any OpenAI-compatible endpoint |
+| Faithfulness check | NLI cross-encoder (deberta-v3-small), falls back to word overlap |
+| Tool interface | MCP server |
+| Deploy | Docker Compose |
 
-## Stack
+## Run it
 
-- Python, FastAPI, LangGraph
-- Qdrant and PostgreSQL full-text search
-- Sentence Transformers and cross-encoder reranking
-- Hugging Face / OpenAI-compatible LLM endpoints
-- PyMuPDF, Docker Compose, MCP
+```bash
+cp .env.example .env
+docker compose up --build -d          # postgres + qdrant + api on :8000
 
-## Setup
+python scripts/download_papers.py     # 5 arxiv papers into data/pdfs
+docker compose exec api python scripts/ingest_dir.py data/pdfs
+```
 
-1. Create a virtual environment and install dependencies:
+First run downloads the HF models, so give it a few minutes.
 
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-   pip install -r requirements.txt
-   ```
+```bash
+curl -X POST localhost:8000/ask -H 'content-type: application/json' \
+  -d '{"question": "Explain the machine learning methods used in particle event reconstruction."}'
+```
 
-2. Copy `.env.example` to `.env` and configure the model endpoint and service settings. Never commit `.env` or credentials.
-3. Start the supporting services:
+Other endpoints: `POST /ingest` (upload pdf), `POST /search`, `GET /documents`, `GET /health`.
+Swagger UI: http://localhost:8000/docs
 
-   ```bash
-   docker compose up -d
-   ```
+CPU-only is fine but the 1.5B model is slow (~20-60 s per answer). With a GPU it's a few seconds.
+To use a bigger model behind vLLM or an institute LLM proxy, set `LLM_BACKEND=openai`,
+`LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` in `.env`.
 
-4. Use the scripts in `scripts/` to download sample papers and ingest a PDF directory. Run the API using the command documented in `app/api/main.py` or the Makefile.
+## MCP server
+
+```bash
+python -m app.mcp_server
+```
+
+Tools: `search_papers`, `ask_research_question`, `get_passage`, `list_documents`.
+
+Claude Desktop config example:
+```json
+{
+  "mcpServers": {
+    "research-agent": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "/path/to/sci-research-agent"
+    }
+  }
+}
+```
+(needs Postgres and Qdrant reachable, so `docker compose up -d postgres qdrant` first.)
 
 ## Evaluation
 
-The repository includes an evaluation harness and a small starter QA dataset. The starter set is for smoke-testing the evaluation pipeline only; it is not a statistically meaningful benchmark. Build a larger manually verified dataset, check the cited PDF pages, and report retrieval/citation/faithfulness metrics only after running that evaluation.
+`app/evaluation/qa_dataset.jsonl` has 5 starter questions. **You must verify them by hand**:
+open each PDF, note the pages that really answer the question, fill in `"pages"`, and grow the
+set to 30+ questions. Don't report numbers from the starter file as results.
 
-## Current limitations
+```bash
+docker compose exec api python -m app.evaluation.run_eval \
+    --data app/evaluation/qa_dataset.jsonl --generate
+```
+Writes `eval_results/report.json`. Metrics:
 
-- PDF text extraction can lose structure in tables, equations, and multi-column layouts.
-- Page metadata represents extracted PDF page indexes and may not match printed page labels.
-- The lightweight NLI/overlap-based verifier can produce false positives and false negatives; it is an experimental guardrail, not proof of factual correctness.
-- The included QA set is small and requires expansion and manual ground-truth verification.
-- Model quality and latency depend on the configured inference endpoint and hardware.
+- **Recall@5, MRR** - does retrieval surface the gold doc/page
+- **Citation correctness** - share of cited sources that point to the gold doc/page
+- **Answer faithfulness** - mean share of claims entailed by their cited passage (NLI)
+- **Hallucination rate** - sentence-level (unsupported claims / all claims) and answer-level
+- **Latency** - retrieval p50/p95, end-to-end p50
 
-## Project status
+Add `--no-rerank` to measure what reranking gives you; that comparison makes a good table
+for your write-up.
 
-Research prototype. It is not presented as a production-ready or scientifically validated research system. Evaluate it on real papers and a manually checked benchmark before making quantitative performance claims.
+## Tests
+
+```bash
+pip install pytest && pytest -q tests
+```
+Covers chunking, RRF fusion, and the metric functions (no models/DB needed).
+
+## Known limitations
+
+- Faithfulness uses a small NLI model, so it has errors in both directions. Spot-check flagged claims.
+- PDF parsing is plain text extraction; tables, equations and two-column layouts can get messy.
+- Page numbers are PDF page indexes, not the printed page numbers in the paper.
+- Small local LLMs sometimes skip citation tags; those sentences show up as `uncited`.
+
+## Ideas to extend
+
+- Section-aware chunking (use headings from PyMuPDF blocks)
+- Qdrant sparse vectors instead of Postgres FTS
+- Streaming answers, simple web UI
+- Compare embedding models (bge, e5) with the eval script
